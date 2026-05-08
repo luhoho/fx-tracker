@@ -16,3 +16,4 @@ fx.db.backup-*
 
 # Тимчасовий звіт — буде генеруватися Actions і комітитися окремо
 last-report.txt
+Terminal Saved Output.txt

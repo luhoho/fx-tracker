@@ -15,5 +15,4 @@ fx.db.backup-*
 .DS_Store
 
 # Тимчасовий звіт — буде генеруватися Actions і комітитися окремо
-last-report.txt
 Terminal Saved Output.txt

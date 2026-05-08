@@ -1,0 +1,47 @@
+name: Collect FX rates
+
+on:
+  # Розклад у UTC. Київ = UTC+3 (з осені 2024 без переходу на літній час)
+  # 9:00 Києва = 6:00 UTC, 14:00 = 11:00 UTC, 19:00 = 16:00 UTC
+  schedule:
+    - cron: '0 6,11,16 * * 1-5'
+
+  # Дозволяє запустити вручну з вкладки Actions у браузері (для тестів)
+  workflow_dispatch:
+
+# Дозволи: пишемо у репозиторій, бо комітимо оновлений fx.db
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout репозиторію
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Встановити залежності
+        run: pip install -r requirements.txt
+
+      - name: Зібрати курси
+        run: python main.py collect
+
+      - name: Закомітити оновлений fx.db
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fx.db
+          # Якщо БД не змінилась (наприклад, банк недоступний) — тихо вийти,
+          # без помилки
+          if git diff --staged --quiet; then
+            echo "Немає змін у fx.db, нічого комітити"
+          else
+            git commit -m "Auto: оновлення курсів $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          fi

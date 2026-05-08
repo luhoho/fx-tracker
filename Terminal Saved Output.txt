@@ -1,0 +1,48 @@
+Last login: Fri Apr 17 20:46:29 on ttys000
+
+The default interactive shell is now zsh.
+To update your account to use zsh, please run `chsh -s /bin/zsh`.
+For more details, please visit https://support.apple.com/kb/HT208050.
+Tetianas-Mac:~ luhovska$ echo 'export EDITOR=nano' >> ~/.bash_profile
+Tetianas-Mac:~ luhovska$ source ~/.bash_profile
+Tetianas-Mac:~ luhovska$ crontab -e
+crontab: no crontab for luhovska - using an empty one
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  UW PICO 5.09             File: /tmp/crontab.KH7mPCDywU              Modified  
+
+0 9,14,19 * * 1-5  cd /Users/luhovska/Documents/fx-tracker && /Users/luhovska/D$
+$ka/Documents/fx-tracker/cron.log 2>&1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^G Get Help  ^O WriteOut  ^R Read File ^Y Prev Pg   ^K Cut Text  ^C Cur Pos   
+^X Exit      ^J Justify   ^W Where is  ^V Next Pg   ^U UnCut Text^T To Spell  

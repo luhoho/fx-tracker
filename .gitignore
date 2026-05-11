@@ -16,3 +16,4 @@ fx.db.backup-*
 
 # Тимчасовий звіт — буде генеруватися Actions і комітитися окремо
 Terminal Saved Output.txt
+dashboard.py.backup

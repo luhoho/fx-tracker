@@ -1,0 +1,70 @@
+name: Build dashboard
+
+on:
+  # Запускається після успішного збору курсів
+  workflow_run:
+    workflows: ["Collect FX rates"]
+    types: [completed]
+
+  # І раз на день о 7:05 UTC (10:05 Києва) — резервний запуск після звіту
+  schedule:
+    - cron: '5 7 * * 1-5'
+
+  # Дозволяє запустити вручну
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Запускати тільки якщо попередній workflow був успішним
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Встановити залежності
+        run: pip install -r requirements.txt
+
+      - name: Згенерувати дашборд
+        run: python dashboard.py
+
+      - name: Закомітити dashboard/index.html
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dashboard/index.html
+          if git diff --staged --quiet; then
+            echo "Дашборд не змінився"
+          else
+            git commit -m "Auto: оновлено дашборд $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
+
+      - name: Upload artifact для GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

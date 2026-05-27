@@ -25,7 +25,7 @@ LOG_PATH = Path(__file__).parent / "fx-tracker.log"
 REPORT_PATH = Path(__file__).parent / "last-report.txt"
 
 PAIRS = ["USD/UAH", "EUR/UAH", "EUR/USD"]
-SOURCES = ["monobank", "raiffeisen", "sense"]
+SOURCES = ["monobank", "raiffeisen", "sense", "pumb", "otp", "privatbank"]
 
 
 def setup_logging() -> None:

@@ -93,6 +93,8 @@ _ROW_PATTERN_MD = re.compile(
 _MINFIN_URLS = {
     "raiffeisen": "https://minfin.com.ua/company/aval/currency/",
     "sense":      "https://minfin.com.ua/company/alfa-bank/currency/",
+    "pumb":       "https://minfin.com.ua/company/pumb/currency/",
+    "otp":        "https://minfin.com.ua/company/otp-bank/currency/",
 }
 
 
@@ -149,13 +151,60 @@ def fetch_sense() -> list[dict]:
     return _fetch_minfin("sense", _MINFIN_URLS["sense"])
 
 
+def fetch_pumb() -> list[dict]:
+    """Курси ПУМБ (через minfin, безготівковий/онлайн курс банку)."""
+    return _fetch_minfin("pumb", _MINFIN_URLS["pumb"])
+
+
+def fetch_otp() -> list[dict]:
+    """Курси ОТП Банку (через minfin, безготівковий/онлайн курс банку)."""
+    return _fetch_minfin("otp", _MINFIN_URLS["otp"])
+
+
+def fetch_privatbank() -> list[dict]:
+    """
+    Курси ПриватБанку через публічний API (безготівковий, coursid=11).
+    coursid=5  — готівковий курс (каса відділення)
+    coursid=11 — безготівковий / онлайн (обмін у застосунку) — наш випадок
+    """
+    data = _http_get(
+        "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=11"
+    ).json()
+    now = int(time.time())
+    out: list[dict] = []
+    for row in data:
+        ccy = row.get("ccy")
+        base = row.get("base_ccy")
+        if ccy not in ("USD", "EUR") or base != "UAH":
+            continue
+        try:
+            buy = float(row["buy"])
+            sell = float(row["sale"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        out.append({
+            "source": "privatbank",
+            "pair": f"{ccy}/UAH",
+            "buy": buy,
+            "sell": sell,
+            "cross": None,
+            "ts": now,
+        })
+    return out
+
+
 def fetch_all(
-    sources: Iterable[str] = ("monobank", "raiffeisen", "sense"),
+    sources: Iterable[str] = (
+        "monobank", "raiffeisen", "sense", "pumb", "otp", "privatbank",
+    ),
 ) -> list[dict]:
     fns = {
         "monobank":   fetch_monobank,
         "raiffeisen": fetch_raiffeisen,
         "sense":      fetch_sense,
+        "pumb":       fetch_pumb,
+        "otp":        fetch_otp,
+        "privatbank": fetch_privatbank,
     }
     results: list[dict] = []
     for name in sources:

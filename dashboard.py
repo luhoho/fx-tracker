@@ -1,13 +1,11 @@
 """
 Генератор HTML-дашборду для FX-tracker.
 
-Читає fx.db, формує JSON з усіма потрібними даними, вставляє у HTML-шаблон
-як <script>. Жодного backend-сервера не треба — все статичне.
+- "Куди йти зараз": 4 картки (USD мої / USD усі / EUR мої / EUR усі).
+- "Усі курси": одна таблиця, USD і EUR візуально розділені.
+- Графіки USD/EUR з перемикачем "мої / усі" і спільним перемикачем періоду.
 
-Запуск:
-    python dashboard.py
-
-Залежності: тільки стандартна бібліотека Python.
+Запуск: python dashboard.py
 """
 
 from __future__ import annotations
@@ -18,61 +16,55 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from analyzer import analyze, spread_analysis
+from analyzer import analyze
 
 DB_PATH = Path(__file__).parent / "fx.db"
 OUT_PATH = Path(__file__).parent / "dashboard" / "index.html"
 
+MY_BANKS = ["monobank", "raiffeisen", "sense"]
+NEW_BANKS = ["pumb", "otp", "privatbank"]
+ALL_BANKS = MY_BANKS + NEW_BANKS
 PAIRS = ["USD/UAH", "EUR/UAH"]
-SOURCES = ["monobank", "raiffeisen", "sense"]
+HISTORY_DAYS = 366
 
 
-def fetch_history(days: int = 30) -> dict:
+def _conn():
+    c = sqlite3.connect(DB_PATH)
+    c.row_factory = sqlite3.Row
+    return c
+
+
+def fetch_history(days=HISTORY_DAYS):
     since = int(time.time()) - days * 86400
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = _conn()
     rows = conn.execute(
-        "SELECT ts, source, pair, buy, sell FROM rates "
-        "WHERE ts >= ? AND pair IN ('USD/UAH', 'EUR/UAH') "
-        "ORDER BY ts;",
+        "SELECT ts, source, pair, buy FROM rates "
+        "WHERE ts >= ? AND pair IN ('USD/UAH','EUR/UAH') ORDER BY ts;",
         (since,),
     ).fetchall()
     conn.close()
-    out: dict = {"USD/UAH": {}, "EUR/UAH": {}}
+    tmp = {"USD/UAH": {}, "EUR/UAH": {}}
     for r in rows:
-        pair = r["pair"]
-        src = r["source"]
-        if src not in out[pair]:
-            out[pair][src] = []
-        out[pair][src].append({
-            "ts": datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d"),
-            "buy": r["buy"],
-            "sell": r["sell"],
-        })
+        if r["buy"] is None:
+            continue
+        date = datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d")
+        tmp[r["pair"]].setdefault(r["source"], {})[date] = r["buy"]
+    out = {"USD/UAH": {}, "EUR/UAH": {}}
+    for pair in PAIRS:
+        for src, by_date in tmp[pair].items():
+            out[pair][src] = [{"ts": d, "buy": by_date[d]} for d in sorted(by_date)]
     return out
 
 
-def latest_matrix() -> dict:
-    """
-    Матриця банк × пара з останніми курсами:
-    {
-        "USD/UAH": {"monobank": {"buy": 43.7, "sell": 44.0}, ...},
-        "EUR/UAH": {...},
-        "EUR/USD": {"monobank": {"buy": ..., "sell": ...}},
-        "ts": "2026-05-08 15:45",  # час останнього оновлення
-    }
-    """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    out: dict = {"USD/UAH": {}, "EUR/UAH": {}, "EUR/USD": {}}
+def latest_matrix():
+    conn = _conn()
+    out = {"USD/UAH": {}, "EUR/UAH": {}, "EUR/USD": {}}
     latest_ts = 0
     for pair in ["USD/UAH", "EUR/UAH", "EUR/USD"]:
-        for src in SOURCES:
+        for src in ALL_BANKS:
             row = conn.execute(
-                "SELECT ts, buy, sell FROM rates "
-                "WHERE source = ? AND pair = ? "
-                "ORDER BY ts DESC LIMIT 1;",
-                (src, pair),
+                "SELECT ts,buy,sell FROM rates WHERE source=? AND pair=? "
+                "ORDER BY ts DESC LIMIT 1;", (src, pair),
             ).fetchone()
             if row:
                 out[pair][src] = {"buy": row["buy"], "sell": row["sell"]}
@@ -82,65 +74,53 @@ def latest_matrix() -> dict:
     return out
 
 
-def signals_data() -> list[dict]:
-    out = []
-    for pair in PAIRS:
-        sig = analyze("monobank", pair)
-        out.append({
-            "pair": pair,
-            "current_buy": sig.current_buy,
-            "current_sell": sig.current_sell,
-            "avg_buy_30d": sig.avg_buy_30d,
-            "avg_sell_30d": sig.avg_sell_30d,
-            "pct_rank_buy_30d": sig.pct_rank_buy_30d,
-            "pct_rank_sell_30d": sig.pct_rank_sell_30d,
-            "action": sig.action,
-            "note": sig.note,
-        })
-    return out
-
-
-def best_banks_data() -> list[dict]:
-    out = []
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    for pair in PAIRS:
-        sp = spread_analysis(pair, SOURCES)
-        # Розраховуємо різницю vs гірший банк — щоб показати "економію"
-        all_buys, all_sells = [], []
-        for src in SOURCES:
-            row = conn.execute(
-                "SELECT buy, sell FROM rates WHERE source=? AND pair=? "
-                "ORDER BY ts DESC LIMIT 1;",
-                (src, pair),
-            ).fetchone()
-            if row:
-                if row["buy"] is not None: all_buys.append(row["buy"])
-                if row["sell"] is not None: all_sells.append(row["sell"])
-
-        best_sell_diff = (max(all_buys) - min(all_buys)) if len(all_buys) >= 2 else 0
-        best_buy_diff = (max(all_sells) - min(all_sells)) if len(all_sells) >= 2 else 0
-
-        out.append({
-            "pair": pair,
-            "best_sell": sp["best_place_to_sell_fx"],  # (bank, rate)
-            "best_buy": sp["best_place_to_buy_fx"],
-            "sell_diff": round(best_sell_diff, 4),
-            "buy_diff": round(best_buy_diff, 4),
-        })
+def _best_among(pair, banks):
+    conn = _conn()
+    buys, sells = [], []
+    for src in banks:
+        row = conn.execute(
+            "SELECT buy,sell FROM rates WHERE source=? AND pair=? "
+            "ORDER BY ts DESC LIMIT 1;", (src, pair),
+        ).fetchone()
+        if row:
+            if row["buy"] is not None:
+                buys.append((src, row["buy"]))
+            if row["sell"] is not None:
+                sells.append((src, row["sell"]))
     conn.close()
+    bs = max(buys, key=lambda x: x[1]) if buys else None
+    bb = min(sells, key=lambda x: x[1]) if sells else None
+    ws = min(buys, key=lambda x: x[1]) if buys else None
+    wb = max(sells, key=lambda x: x[1]) if sells else None
+    return {
+        "best_sell": bs, "best_buy": bb,
+        "sell_diff": round(bs[1] - ws[1], 4) if bs and ws else 0,
+        "buy_diff": round(wb[1] - bb[1], 4) if bb and wb else 0,
+    }
+
+
+def best_banks_data():
+    return [{"pair": p, "my": _best_among(p, MY_BANKS), "all": _best_among(p, ALL_BANKS)} for p in PAIRS]
+
+
+def signals_data():
+    out = []
+    for pair in PAIRS:
+        s = analyze("monobank", pair)
+        out.append({
+            "pair": pair, "current_buy": s.current_buy, "current_sell": s.current_sell,
+            "pct_rank_buy_30d": s.pct_rank_buy_30d, "pct_rank_sell_30d": s.pct_rank_sell_30d,
+            "action": s.action, "note": s.note,
+        })
     return out
 
 
-def build_data() -> dict:
+def build_data():
     return {
-        "generated_at_local": (
-            datetime.now(timezone.utc) + timedelta(hours=3)
-        ).strftime("%d %b %Y, %H:%M"),
-        "matrix": latest_matrix(),
-        "signals": signals_data(),
-        "best_banks": best_banks_data(),
-        "history": fetch_history(30),
+        "generated_at_local": (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d %b %Y, %H:%M"),
+        "my_banks": MY_BANKS, "new_banks": NEW_BANKS,
+        "matrix": latest_matrix(), "signals": signals_data(),
+        "best_banks": best_banks_data(), "history": fetch_history(),
     }
 
 
@@ -152,187 +132,90 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <title>FX-tracker</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-  :root {
-    --bg: #fafafa;
-    --card: #ffffff;
-    --border: #e5e7eb;
-    --border-strong: #d1d5db;
-    --text: #0f172a;
-    --text-muted: #64748b;
-    --text-faint: #94a3b8;
-    --accent: #2563eb;
-    --positive: #16a34a;
-    --positive-bg: #f0fdf4;
-    --warning: #ea580c;
-    --warning-bg: #fff7ed;
-    --neutral-bg: #f8fafc;
-    --c1: #2563eb;
-    --c2: #16a34a;
-    --c3: #ea580c;
-  }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
-    font-size: 14px;
-    line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-  }
-  .container { max-width: 960px; margin: 0 auto; padding: 32px 20px 60px; }
-  header { margin-bottom: 32px; }
-  h1 { font-size: 22px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
-  .ts { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
-  section { margin-bottom: 28px; }
-  section > h2 {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-    margin: 0 0 12px 0;
-  }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 20px;
-  }
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+  :root{ --bg:#fafafa;--card:#fff;--border:#e5e7eb;--text:#0f172a;--muted:#64748b;
+    --faint:#94a3b8;--accent:#2563eb;--positive:#16a34a;--positive-bg:#f0fdf4;
+    --warning:#ea580c;--warning-bg:#fff7ed;--neutral-bg:#f8fafc;--usd-bg:#fbfdff;--eur-bg:#fffdfa; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0;padding:0;background:var(--bg);color:var(--text); }
+  body{ font-family:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;
+    font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased; }
+  .container{ max-width:1000px;margin:0 auto;padding:28px 18px 50px; }
+  header{ margin-bottom:22px; }
+  h1{ font-size:21px;font-weight:600;margin:0;letter-spacing:-0.01em; }
+  .ts{ color:var(--muted);font-size:13px;margin-top:3px; }
+  section{ margin-bottom:22px; }
+  section>h2{ font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;
+    color:var(--muted);margin:0 0 10px 0; }
+  .card{ background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px; }
 
-  /* --- Hero: куди йти зараз --- */
-  .hero-card { padding: 22px; }
-  .hero-pair { font-size: 12px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.06em; }
-  .hero-row { margin-top: 14px; display: flex; flex-direction: column; gap: 4px; }
-  .hero-row + .hero-row { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
-  .hero-label { font-size: 12px; color: var(--text-muted); }
-  .hero-bank {
-    font-size: 20px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-  }
-  .hero-bank .rate {
-    font-variant-numeric: tabular-nums;
-    font-weight: 500;
-    color: var(--text-muted);
-    font-size: 16px;
-  }
-  .hero-savings {
-    font-size: 11px;
-    color: var(--positive);
-    margin-top: 2px;
-    font-variant-numeric: tabular-nums;
-  }
+  .hero-grid{ display:grid;grid-template-columns:repeat(4,1fr);gap:12px; }
+  @media (max-width:860px){ .hero-grid{ grid-template-columns:1fr 1fr; } }
+  @media (max-width:480px){ .hero-grid{ grid-template-columns:1fr; } }
+  .hero-card{ padding:14px; }
+  .hero-tag{ font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;
+    color:var(--faint);margin-bottom:2px; }
+  .hero-pair{ font-size:15px;font-weight:700;letter-spacing:-0.01em;margin-bottom:12px; }
+  .hero-row{ margin-bottom:10px; }
+  .hero-row:last-child{ margin-bottom:0; }
+  .hero-label{ font-size:11px;color:var(--muted); }
+  .hero-bank{ font-size:17px;font-weight:600;letter-spacing:-0.01em; }
+  .hero-bank .rate{ font-variant-numeric:tabular-nums;font-weight:500;color:var(--muted);font-size:14px; }
+  .hero-savings{ font-size:10px;color:var(--positive);font-variant-numeric:tabular-nums;margin-top:1px; }
+  .hero-hint{ font-size:11px;color:var(--muted);margin-top:10px;padding:8px 10px;
+    background:var(--positive-bg);border-radius:6px; }
 
-  /* --- Матриця курсів --- */
-  table.matrix { width: 100%; border-collapse: separate; border-spacing: 0; }
-  table.matrix th, table.matrix td {
-    padding: 10px 12px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
-  }
-  table.matrix th {
-    font-weight: 500;
-    color: var(--text-muted);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    background: var(--neutral-bg);
-  }
-  table.matrix td.num {
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-  }
-  table.matrix tr:last-child td { border-bottom: none; }
-  .bank-name { font-weight: 500; }
-  .pair-head { color: var(--text); }
-  .pair-head .sub { display: block; font-weight: 400; font-size: 10px; color: var(--text-faint); text-transform: none; letter-spacing: 0; margin-top: 2px; }
-  .best { color: var(--positive); font-weight: 600; }
+  table.matrix{ width:100%;border-collapse:separate;border-spacing:0; }
+  table.matrix th,table.matrix td{ padding:9px 10px;text-align:left;
+    border-bottom:1px solid var(--border);font-size:13px; }
+  table.matrix th{ font-weight:500;color:var(--muted);font-size:11px;
+    text-transform:uppercase;letter-spacing:0.05em;background:var(--neutral-bg); }
+  table.matrix td.num{ font-variant-numeric:tabular-nums;text-align:right; }
+  table.matrix .usd-col{ background:var(--usd-bg);border-right:2px solid var(--border); }
+  table.matrix .eur-col{ background:var(--eur-bg); }
+  table.matrix tr:last-child td{ border-bottom:none; }
+  .bank-name{ font-weight:500; }
+  .pair-head .sub{ display:block;font-weight:400;font-size:10px;color:var(--faint);
+    text-transform:none;letter-spacing:0;margin-top:1px; }
+  .best{ color:var(--positive);font-weight:600; }
+  .sep-row td{ background:var(--neutral-bg);font-size:10px;color:var(--faint);
+    text-transform:uppercase;letter-spacing:0.05em;padding:4px 10px; }
+  .new-bank td.bank-name{ color:var(--muted); }
 
-  /* --- Сигнал з прогрес-баром --- */
-  .signal-card { padding: 20px; }
-  .signal-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
-  .signal-pair { font-size: 12px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.06em; }
-  .signal-rate {
-    font-size: 24px; font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.02em;
-  }
-  .signal-status {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 12px;
-  }
-  .status-buy_fx, .status-sell_fx { background: var(--positive-bg); color: var(--positive); }
-  .status-hold { background: var(--warning-bg); color: var(--warning); }
-  .status-insufficient_data { background: var(--neutral-bg); color: var(--text-muted); }
+  .grid-2{ display:grid;grid-template-columns:1fr 1fr;gap:12px; }
+  @media (max-width:760px){ .grid-2{ grid-template-columns:1fr; } }
+  .signal-pair{ font-size:12px;font-weight:600;color:var(--muted);letter-spacing:0.05em; }
+  .signal-rate{ font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;
+    letter-spacing:-0.02em;margin-top:2px; }
+  .signal-status{ display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;
+    font-weight:600;text-transform:uppercase;letter-spacing:0.03em;margin:6px 0 10px; }
+  .status-buy_fx,.status-sell_fx{ background:var(--positive-bg);color:var(--positive); }
+  .status-hold{ background:var(--warning-bg);color:var(--warning); }
+  .status-insufficient_data{ background:var(--neutral-bg);color:var(--muted); }
+  .signal-note{ font-size:12px;color:var(--muted);margin-bottom:12px; }
+  .range-bar-labels{ display:flex;justify-content:space-between;font-size:10px;color:var(--faint);margin-bottom:4px; }
+  .range-bar-track{ position:relative;height:4px;background:var(--border);border-radius:2px; }
+  .range-bar-dot{ position:absolute;top:-3px;width:10px;height:10px;border-radius:50%;
+    background:var(--accent);transform:translateX(-50%); }
+  .range-bar-caption{ font-size:11px;color:var(--faint);margin-top:5px; }
 
-  .signal-note { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
+  .period-tabs{ display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap; }
+  .period-tab{ padding:5px 12px;border:1px solid var(--border);background:var(--card);
+    border-radius:999px;font-size:12px;color:var(--muted);cursor:pointer; }
+  .period-tab.active{ background:var(--text);color:#fff;border-color:var(--text); }
+  .chart-card{ padding:14px 16px; }
+  .chart-head{ display:flex;justify-content:space-between;align-items:center;margin-bottom:8px; }
+  .chart-title{ font-size:13px;font-weight:600; }
+  .scope-toggle{ display:flex;gap:4px; }
+  .scope-btn{ padding:3px 10px;border:1px solid var(--border);background:var(--card);
+    border-radius:6px;font-size:11px;color:var(--muted);cursor:pointer; }
+  .scope-btn.active{ background:var(--neutral-bg);color:var(--text);border-color:var(--faint);font-weight:600; }
+  .chart-container{ height:230px; }
 
-  /* Прогрес-бар "де ми в місячному діапазоні" */
-  .range-bar { margin-top: 8px; }
-  .range-bar-labels {
-    display: flex; justify-content: space-between;
-    font-size: 10px; color: var(--text-faint);
-    margin-bottom: 4px;
-  }
-  .range-bar-track {
-    position: relative;
-    height: 4px;
-    background: var(--border);
-    border-radius: 2px;
-  }
-  .range-bar-dot {
-    position: absolute;
-    top: -3px;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--accent);
-    transform: translateX(-50%);
-  }
-  .range-bar-caption {
-    font-size: 11px; color: var(--text-faint);
-    margin-top: 6px;
-  }
-
-  /* --- Графіки --- */
-  .chart-card { padding: 18px 20px; }
-  .chart-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    margin-bottom: 8px;
-  }
-  .chart-title { font-size: 13px; font-weight: 600; }
-  .chart-sub { font-size: 11px; color: var(--text-faint); }
-  .chart-container { height: 240px; }
-
-  /* --- Футер --- */
-  footer {
-    text-align: center;
-    color: var(--text-faint);
-    font-size: 11px;
-    margin-top: 40px;
-    line-height: 1.6;
-  }
-  footer a { color: var(--text-muted); }
-
-  /* Мобільні правки */
-  @media (max-width: 600px) {
-    .container { padding: 20px 14px 40px; }
-    table.matrix th, table.matrix td { padding: 8px 6px; font-size: 12px; }
-    .hero-bank { font-size: 17px; }
-    .signal-rate { font-size: 20px; }
+  footer{ text-align:center;color:var(--faint);font-size:11px;margin-top:32px;line-height:1.6; }
+  @media (max-width:600px){
+    .container{ padding:16px 12px 36px; }
+    table.matrix th,table.matrix td{ padding:7px 5px;font-size:12px; }
+    .signal-rate{ font-size:19px; }
   }
 </style>
 </head>
@@ -344,271 +227,222 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="ts" id="ts"></div>
 </header>
 
-<!-- БЛОК 1: Куди йти зараз — найголовніше -->
 <section>
   <h2>Куди йти зараз</h2>
-  <div class="grid-2" id="hero"></div>
+  <div class="hero-grid" id="hero"></div>
+  <div id="hero-hints"></div>
 </section>
 
-<!-- БЛОК 2: Матриця курсів -->
 <section>
   <h2>Усі курси</h2>
-  <div class="card" style="padding: 0; overflow: hidden;">
+  <div class="card" style="padding:0;overflow:hidden;">
     <table class="matrix" id="matrix"></table>
   </div>
 </section>
 
-<!-- БЛОК 3: Сигнал з прогрес-баром -->
 <section>
   <h2>Стан ринку (база — Monobank)</h2>
   <div class="grid-2" id="signals"></div>
 </section>
 
-<!-- БЛОК 4: Графіки -->
 <section>
-  <h2>Історія за 30 днів</h2>
+  <h2>Історія курсів</h2>
+  <div class="period-tabs" id="period-tabs">
+    <div class="period-tab" data-days="30">30 днів</div>
+    <div class="period-tab" data-days="90">3 місяці</div>
+    <div class="period-tab" data-days="180">6 місяців</div>
+    <div class="period-tab" data-days="366">1 рік</div>
+  </div>
   <div class="grid-2">
     <div class="card chart-card">
       <div class="chart-head">
-        <div class="chart-title">USD/UAH</div>
-        <div class="chart-sub">курс купівлі (buy)</div>
+        <div class="chart-title">USD/UAH <span style="font-weight:400;color:var(--faint);font-size:11px;">buy</span></div>
+        <div class="scope-toggle" data-chart="usd">
+          <div class="scope-btn active" data-scope="my">Мої</div>
+          <div class="scope-btn" data-scope="all">Усі</div>
+        </div>
       </div>
       <div class="chart-container"><canvas id="chart-usd"></canvas></div>
     </div>
     <div class="card chart-card">
       <div class="chart-head">
-        <div class="chart-title">EUR/UAH</div>
-        <div class="chart-sub">курс купівлі (buy)</div>
+        <div class="chart-title">EUR/UAH <span style="font-weight:400;color:var(--faint);font-size:11px;">buy</span></div>
+        <div class="scope-toggle" data-chart="eur">
+          <div class="scope-btn active" data-scope="my">Мої</div>
+          <div class="scope-btn" data-scope="all">Усі</div>
+        </div>
       </div>
       <div class="chart-container"><canvas id="chart-eur"></canvas></div>
     </div>
   </div>
 </section>
 
-<footer>
-  Оновлюється 3 рази на день автоматично · Дані: Monobank API, minfin.com.ua
-</footer>
+<footer>Оновлюється 3 рази на день автоматично · Дані: Monobank API, minfin.com.ua, privatbank API</footer>
 
 </div>
 
 <script>
 const DATA = __DATA_JSON__;
-
-const COLORS = {
-  monobank:   "#94a3b8",  /* сірий */
-  raiffeisen: "#ea580c",  /* помаранчевий */
-  sense:      "#2563eb",  /* синій */
-};
-const BANK_LABEL = { monobank: "Mono", raiffeisen: "Райф", sense: "Sense" };
-
-function fmt(n, d=4) { return n == null ? "—" : n.toFixed(d); }
-function fmtPct(n) { return n == null ? "—" : n.toFixed(0) + "%"; }
-
+const COLORS = { monobank:"#94a3b8",raiffeisen:"#ea580c",sense:"#2563eb",
+  pumb:"#16a34a",otp:"#9333ea",privatbank:"#e11d48" };
+const BANK_LABEL = { monobank:"Mono",raiffeisen:"Райф",sense:"Sense",pumb:"ПУМБ",otp:"ОТП",privatbank:"Приват" };
+const MY = DATA.my_banks, NEW = DATA.new_banks, ALL = MY.concat(NEW);
+function fmt(n,d=4){ return n==null?"—":n.toFixed(d); }
+function fmtPct(n){ return n==null?"—":n.toFixed(0)+"%"; }
 document.getElementById("ts").textContent = "Оновлено: " + DATA.generated_at_local;
 
-/* ---------- БЛОК 1: Hero ---------- */
 {
   const root = document.getElementById("hero");
+  const hints = document.getElementById("hero-hints");
+  function heroCard(pair, scope, tag) {
+    const bb = DATA.best_banks.find(b=>b.pair===pair);
+    const d = bb[scope];
+    let h = `<div class="card hero-card"><div class="hero-tag">${tag}</div><div class="hero-pair">${pair}</div>`;
+    if (d.best_sell) {
+      const [bank,rate]=d.best_sell;
+      const sav=d.sell_diff>0?`<div class="hero-savings">+${fmt(d.sell_diff)} vs найгірший</div>`:"";
+      h+=`<div class="hero-row"><div class="hero-label">Продати валюту</div>
+        <div class="hero-bank">${BANK_LABEL[bank]} <span class="rate">@ ${fmt(rate)}</span></div>${sav}</div>`;
+    }
+    if (d.best_buy) {
+      const [bank,rate]=d.best_buy;
+      const sav=d.buy_diff>0?`<div class="hero-savings">−${fmt(d.buy_diff)} vs найгірший</div>`:"";
+      h+=`<div class="hero-row"><div class="hero-label">Купити валюту</div>
+        <div class="hero-bank">${BANK_LABEL[bank]} <span class="rate">@ ${fmt(rate)}</span></div>${sav}</div>`;
+    }
+    return h+`</div>`;
+  }
+  let html="";
+  html+=heroCard("USD/UAH","my","USD · мої банки");
+  html+=heroCard("USD/UAH","all","USD · усі банки");
+  html+=heroCard("EUR/UAH","my","EUR · мої банки");
+  html+=heroCard("EUR/UAH","all","EUR · усі банки");
+  root.innerHTML = html;
+
+  let hintHtml="";
   for (const bb of DATA.best_banks) {
-    const card = document.createElement("div");
-    card.className = "card hero-card";
-    let html = `<div class="hero-pair">${bb.pair}</div>`;
-
-    if (bb.best_sell) {
-      const [bank, rate] = bb.best_sell;
-      const savings = bb.sell_diff > 0
-        ? `<div class="hero-savings">+${fmt(bb.sell_diff, 4)} vs найгірший банк</div>` : "";
-      html += `
-        <div class="hero-row">
-          <div class="hero-label">Якщо продаєш валюту</div>
-          <div class="hero-bank">${BANK_LABEL[bank]} <span class="rate">@ ${fmt(rate)}</span></div>
-          ${savings}
-        </div>`;
+    const mb=bb.my.best_buy, ab=bb.all.best_buy;
+    if (mb && ab && ab[0]!==mb[0] && ab[1]<mb[1]) {
+      const diff=(mb[1]-ab[1]).toFixed(4);
+      hintHtml+=`<div class="hero-hint">💡 ${bb.pair}: ${BANK_LABEL[ab[0]]} продає валюту на ${diff} дешевше за твої банки — варто розглянути картку</div>`;
     }
-    if (bb.best_buy) {
-      const [bank, rate] = bb.best_buy;
-      const savings = bb.buy_diff > 0
-        ? `<div class="hero-savings">−${fmt(bb.buy_diff, 4)} vs найгірший банк</div>` : "";
-      html += `
-        <div class="hero-row">
-          <div class="hero-label">Якщо купуєш валюту</div>
-          <div class="hero-bank">${BANK_LABEL[bank]} <span class="rate">@ ${fmt(rate)}</span></div>
-          ${savings}
-        </div>`;
-    }
-    card.innerHTML = html;
-    root.appendChild(card);
   }
+  hints.innerHTML = hintHtml;
 }
 
-/* ---------- БЛОК 2: Матриця ---------- */
 {
-  const table = document.getElementById("matrix");
-  const pairs = ["USD/UAH", "EUR/UAH"];
-  // Знаходимо найкращі значення для виділення
-  const bestBuy = {}, bestSell = {};
-  for (const pair of pairs) {
-    const m = DATA.matrix[pair];
-    let maxBuy = -Infinity, minSell = Infinity;
-    for (const src of Object.keys(m)) {
-      if (m[src].buy != null) maxBuy = Math.max(maxBuy, m[src].buy);
-      if (m[src].sell != null) minSell = Math.min(minSell, m[src].sell);
-    }
-    bestBuy[pair] = maxBuy;
-    bestSell[pair] = minSell;
+  const table=document.getElementById("matrix");
+  const pairs=["USD/UAH","EUR/UAH"];
+  const bestBuy={},bestSell={};
+  for (const pair of pairs){
+    const m=DATA.matrix[pair]; let mb=-Infinity,ms=Infinity;
+    for (const s of Object.keys(m)){ if(m[s].buy!=null)mb=Math.max(mb,m[s].buy); if(m[s].sell!=null)ms=Math.min(ms,m[s].sell); }
+    bestBuy[pair]=mb; bestSell[pair]=ms;
   }
-
-  let html = `<thead><tr><th>Банк</th>`;
-  for (const pair of pairs) {
-    html += `<th colspan="2" class="pair-head" style="text-align:center;">
-      ${pair}<span class="sub">buy · sell</span></th>`;
+  let html=`<thead><tr><th>Банк</th>
+    <th colspan="2" class="pair-head usd-col" style="text-align:center;">USD/UAH<span class="sub">buy &middot; sell</span></th>
+    <th colspan="2" class="pair-head eur-col" style="text-align:center;">EUR/UAH<span class="sub">buy &middot; sell</span></th>
+    </tr></thead><tbody>`;
+  function row(src,isNew){
+    let h=`<tr class="${isNew?'new-bank':''}"><td class="bank-name">${BANK_LABEL[src]}</td>`;
+    const cu=DATA.matrix["USD/UAH"][src]||{};
+    h+=`<td class="num usd-col ${cu.buy===bestBuy["USD/UAH"]?'best':''}">${fmt(cu.buy)}</td>`;
+    h+=`<td class="num usd-col ${cu.sell===bestSell["USD/UAH"]?'best':''}">${fmt(cu.sell)}</td>`;
+    const ce=DATA.matrix["EUR/UAH"][src]||{};
+    h+=`<td class="num eur-col ${ce.buy===bestBuy["EUR/UAH"]?'best':''}">${fmt(ce.buy)}</td>`;
+    h+=`<td class="num eur-col ${ce.sell===bestSell["EUR/UAH"]?'best':''}">${fmt(ce.sell)}</td>`;
+    return h+`</tr>`;
   }
-  html += `</tr></thead><tbody>`;
-
-  for (const src of ["monobank", "raiffeisen", "sense"]) {
-    html += `<tr><td class="bank-name">${BANK_LABEL[src]}</td>`;
-    for (const pair of pairs) {
-      const cell = DATA.matrix[pair][src] || {};
-      const isBestBuy = cell.buy === bestBuy[pair];
-      const isBestSell = cell.sell === bestSell[pair];
-      html += `<td class="num ${isBestBuy ? 'best' : ''}">${fmt(cell.buy)}</td>`;
-      html += `<td class="num ${isBestSell ? 'best' : ''}">${fmt(cell.sell)}</td>`;
-    }
-    html += `</tr>`;
+  for (const src of MY) html+=row(src,false);
+  html+=`<tr class="sep-row"><td colspan="5">Інші банки (для порівняння)</td></tr>`;
+  for (const src of NEW) html+=row(src,true);
+  if (DATA.matrix["EUR/USD"] && DATA.matrix["EUR/USD"].monobank){
+    const m=DATA.matrix["EUR/USD"].monobank;
+    html+=`<tr><td colspan="5" style="font-size:11px;color:var(--muted);text-align:center;background:var(--neutral-bg);">
+      EUR/USD у Mono: ${fmt(m.buy)} / ${fmt(m.sell)} <span style="color:var(--faint)">(для прямого обміну USD&rarr;EUR)</span></td></tr>`;
   }
-  // EUR/USD у Mono — окремий рядок-додаток
-  if (DATA.matrix["EUR/USD"] && DATA.matrix["EUR/USD"].monobank) {
-    const m = DATA.matrix["EUR/USD"].monobank;
-    html += `<tr><td colspan="${1 + pairs.length * 2}"
-      style="font-size: 11px; color: var(--text-muted); text-align:center; background: var(--neutral-bg);">
-      EUR/USD у Mono: ${fmt(m.buy)} / ${fmt(m.sell)}
-      <span style="color:var(--text-faint)">(корисно для прямого обміну USD→EUR)</span>
-      </td></tr>`;
-  }
-  html += `</tbody>`;
-  table.innerHTML = html;
+  html+=`</tbody>`;
+  table.innerHTML=html;
 }
 
-/* ---------- БЛОК 3: Сигнал з прогрес-баром ---------- */
 {
-  const root = document.getElementById("signals");
-  const STATUS = {
-    sell_fx: "Можна продавати",
-    buy_fx:  "Можна купувати",
-    hold:    "Чекати",
-    insufficient_data: "Мало даних",
-  };
-  for (const s of DATA.signals) {
-    const card = document.createElement("div");
-    card.className = "card signal-card";
-
-    const pct = s.action === "sell_fx" ? s.pct_rank_buy_30d
-              : s.action === "buy_fx"  ? s.pct_rank_sell_30d
-              : s.pct_rank_buy_30d;
-    const rate = s.action === "buy_fx" ? s.current_sell : s.current_buy;
-    const isInsuff = s.action === "insufficient_data";
-
-    card.innerHTML = `
-      <div class="signal-head">
-        <div class="signal-pair">${s.pair}</div>
-      </div>
+  const root=document.getElementById("signals");
+  const STATUS={ sell_fx:"Можна продавати",buy_fx:"Можна купувати",hold:"Чекати",insufficient_data:"Мало даних" };
+  for (const s of DATA.signals){
+    const card=document.createElement("div"); card.className="card";
+    const pct=s.action==="buy_fx"?s.pct_rank_sell_30d:s.pct_rank_buy_30d;
+    const rate=s.action==="buy_fx"?s.current_sell:s.current_buy;
+    const insuff=s.action==="insufficient_data";
+    card.innerHTML=`<div class="signal-pair">${s.pair}</div>
       <div class="signal-rate">${fmt(rate)}</div>
       <div class="signal-status status-${s.action}">${STATUS[s.action]}</div>
       <div class="signal-note">${s.note}</div>
-      ${isInsuff ? "" : `
-      <div class="range-bar">
-        <div class="range-bar-labels">
-          <span>мін за 30 днів</span><span>макс за 30 днів</span>
-        </div>
-        <div class="range-bar-track">
-          <div class="range-bar-dot" style="left: ${pct || 0}%;"></div>
-        </div>
-        <div class="range-bar-caption">
-          Поточний курс у ${fmtPct(pct)}-перцентилі місячного діапазону
-        </div>
-      </div>`}
-    `;
+      ${insuff?"":`<div class="range-bar-labels"><span>мін за 30 днів</span><span>макс за 30 днів</span></div>
+      <div class="range-bar-track"><div class="range-bar-dot" style="left:${pct||0}%;"></div></div>
+      <div class="range-bar-caption">Поточний курс у ${fmtPct(pct)}-перцентилі місячного діапазону</div>`}`;
     root.appendChild(card);
   }
 }
 
-/* ---------- БЛОК 4: Графіки ---------- */
-function drawChart(canvasId, pair) {
-  const sources = DATA.history[pair];
-  // Збираємо всі унікальні дати, сортуємо
-  const allDates = new Set();
-  for (const src of Object.keys(sources)) {
-    for (const p of sources[src]) allDates.add(p.ts);
+let currentDays=30;
+const chartScope={ usd:"my",eur:"my" };
+const charts={};
+function buildDatasets(pair,scope,days){
+  const sources=DATA.history[pair];
+  const banks=scope==="my"?MY:ALL;
+  const cutoff=new Date(Date.now()-days*86400000);
+  const allDates=new Set();
+  for (const src of banks){ if(!sources[src])continue;
+    for (const p of sources[src]) if(new Date(p.ts)>=cutoff) allDates.add(p.ts); }
+  const dates=[...allDates].sort();
+  const datasets=[];
+  for (const src of banks){
+    if(!sources[src])continue;
+    const byDate={}; for(const p of sources[src]) byDate[p.ts]=p.buy;
+    const isNew=NEW.includes(src);
+    datasets.push({ label:BANK_LABEL[src], data:dates.map(d=>byDate[d]??null),
+      borderColor:COLORS[src], backgroundColor:COLORS[src], tension:0.25,
+      pointRadius:isNew?2.5:0, pointHoverRadius:4, borderWidth:isNew?1.4:1.8,
+      borderDash:isNew?[4,3]:[], spanGaps:true });
   }
-  const sortedDates = [...allDates].sort();
-
-  const datasets = [];
-  for (const src of ["monobank", "raiffeisen", "sense"]) {
-    if (!sources[src]) continue;
-    // Беремо одну точку на дату (останню в день)
-    const byDate = {};
-    for (const p of sources[src]) byDate[p.ts] = p.buy;
-    datasets.push({
-      label: BANK_LABEL[src],
-      data: sortedDates.map(d => byDate[d] ?? null),
-      borderColor: COLORS[src],
-      backgroundColor: COLORS[src],
-      tension: 0.25,
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      borderWidth: 1.8,
-      spanGaps: true,
-    });
-  }
-
-  // Прорідимо підписи на осі X — кожна 5-та
-  const tickEvery = Math.max(1, Math.floor(sortedDates.length / 6));
-
-  new Chart(document.getElementById(canvasId), {
-    type: "line",
-    data: { labels: sortedDates, datasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: "index", intersect: false },
-      scales: {
-        x: {
-          ticks: {
-            font: { size: 10 },
-            color: "#94a3b8",
-            maxRotation: 0,
-            autoSkip: false,
-            callback: function(val, idx) {
-              return idx % tickEvery === 0 ? this.getLabelForValue(val).slice(5) : "";
-            },
-          },
-          grid: { display: false },
-        },
-        y: {
-          ticks: { font: { size: 10 }, color: "#94a3b8" },
-          grid: { color: "#f1f5f9" },
-          border: { display: false },
-        },
-      },
-      plugins: {
-        legend: {
-          position: "bottom",
-          labels: { font: { size: 11 }, color: "#64748b", boxWidth: 10, boxHeight: 10, padding: 12 },
-        },
-        tooltip: {
-          backgroundColor: "#0f172a",
-          padding: 10,
-          cornerRadius: 6,
-          titleFont: { size: 11 },
-          bodyFont: { size: 12 },
-          callbacks: { label: (ctx) => `${ctx.dataset.label}  ${fmt(ctx.parsed.y)}` },
-        },
-      },
-    },
+  return { labels:dates, datasets };
+}
+function renderChart(key,pair){
+  const r=buildDatasets(pair,chartScope[key],currentDays);
+  const labels=r.labels, datasets=r.datasets;
+  const tickEvery=Math.max(1,Math.floor(labels.length/6));
+  if(charts[key])charts[key].destroy();
+  charts[key]=new Chart(document.getElementById("chart-"+key),{
+    type:"line", data:{ labels:labels,datasets:datasets },
+    options:{ responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      scales:{ x:{ ticks:{font:{size:10},color:"#94a3b8",maxRotation:0,autoSkip:false,
+        callback:function(v,i){return i%tickEvery===0?this.getLabelForValue(v).slice(5):"";}},grid:{display:false} },
+        y:{ ticks:{font:{size:10},color:"#94a3b8"},grid:{color:"#f1f5f9"},border:{display:false} } },
+      plugins:{ legend:{position:"bottom",labels:{font:{size:11},color:"#64748b",boxWidth:10,boxHeight:10,padding:10}},
+        tooltip:{backgroundColor:"#0f172a",padding:10,cornerRadius:6,titleFont:{size:11},bodyFont:{size:12},
+          callbacks:{label:function(c){return BANK_LABEL_FROM(c.dataset.label)+"  "+fmt(c.parsed.y);}}} } },
   });
 }
-drawChart("chart-usd", "USD/UAH");
-drawChart("chart-eur", "EUR/UAH");
+function BANK_LABEL_FROM(x){ return x; }
+function renderAll(){ renderChart("usd","USD/UAH"); renderChart("eur","EUR/UAH"); }
+document.querySelectorAll("#period-tabs .period-tab").forEach(function(tab){
+  tab.addEventListener("click",function(){
+    document.querySelectorAll("#period-tabs .period-tab").forEach(function(t){t.classList.remove("active");});
+    tab.classList.add("active"); currentDays=parseInt(tab.dataset.days); renderAll();
+  });
+});
+document.querySelectorAll(".scope-toggle").forEach(function(tog){
+  const key=tog.dataset.chart;
+  tog.querySelectorAll(".scope-btn").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      tog.querySelectorAll(".scope-btn").forEach(function(b){b.classList.remove("active");});
+      btn.classList.add("active"); chartScope[key]=btn.dataset.scope;
+      renderChart(key,key==="usd"?"USD/UAH":"EUR/UAH");
+    });
+  });
+});
+document.querySelector('#period-tabs .period-tab[data-days="30"]').classList.add("active");
+renderAll();
 </script>
 </body>
 </html>

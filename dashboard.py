@@ -21,8 +21,8 @@ from analyzer import analyze
 DB_PATH = Path(__file__).parent / "fx.db"
 OUT_PATH = Path(__file__).parent / "dashboard" / "index.html"
 
-MY_BANKS = ["monobank", "raiffeisen", "sense"]
-NEW_BANKS = ["pumb", "otp", "privatbank"]
+MY_BANKS = ["monobank", "raiffeisen", "sense", "otp"]
+NEW_BANKS = ["pumb", "privatbank"]
 ALL_BANKS = MY_BANKS + NEW_BANKS
 PAIRS = ["USD/UAH", "EUR/UAH"]
 HISTORY_DAYS = 366
@@ -277,7 +277,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </section>
 
-<footer>Оновлюється 3 рази на день автоматично · Дані: Monobank API, minfin.com.ua, privatbank API</footer>
+<footer>Оновлюється 3 рази на день автоматично · Усі курси — онлайн-обмін (не готівка) · Дані: Monobank API, minfin.com.ua/online, privatbank API</footer>
 
 </div>
 

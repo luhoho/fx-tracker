@@ -2,9 +2,15 @@
 Модуль збору курсів валют.
 
 Джерела:
-- Monobank: публічний API https://api.monobank.ua/bank/currency
-- Raiffeisen Bank Aval: парсинг сторінки minfin.com.ua
-- Sense Bank: парсинг сторінки minfin.com.ua (URL під /company/alfa-bank/)
+- Monobank: публічний API https://api.monobank.ua/bank/currency (онлайн-курс)
+- Raiffeisen Bank Aval: minfin.com.ua/company/aval/currency/online/
+- Sense Bank: minfin.com.ua/company/alfa-bank/currency/online/
+- ПУМБ: minfin.com.ua/company/pumb/currency/online/
+- ОТП Банк: minfin.com.ua/company/otp-bank/currency/online/
+- ПриватБанк: публічний API (coursid=11, безготівковий/онлайн)
+
+Важливо: використовуємо виключно онлайн-курси (безготівковий обмін
+в застосунку/інтернет-банку), а не готівкові курси кас відділень.
 """
 
 from __future__ import annotations
@@ -91,10 +97,10 @@ _ROW_PATTERN_MD = re.compile(
 )
 
 _MINFIN_URLS = {
-    "raiffeisen": "https://minfin.com.ua/company/aval/currency/",
-    "sense":      "https://minfin.com.ua/company/alfa-bank/currency/",
-    "pumb":       "https://minfin.com.ua/company/pumb/currency/",
-    "otp":        "https://minfin.com.ua/company/otp-bank/currency/",
+    "raiffeisen": "https://minfin.com.ua/company/aval/currency/online/",
+    "sense":      "https://minfin.com.ua/company/alfa-bank/currency/online/",
+    "pumb":       "https://minfin.com.ua/company/pumb/currency/online/",
+    "otp":        "https://minfin.com.ua/company/otp-bank/currency/online/",
 }
 
 

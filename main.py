@@ -19,13 +19,14 @@ from pathlib import Path
 
 from analyzer import analyze, spread_analysis
 from fetchers import fetch_all
+from nbu import fetch as fetch_nbu
 from storage import init_db, latest, save_rates
 
 LOG_PATH = Path(__file__).parent / "fx-tracker.log"
 REPORT_PATH = Path(__file__).parent / "last-report.txt"
 
 PAIRS = ["USD/UAH", "EUR/UAH", "EUR/USD"]
-SOURCES = ["monobank", "raiffeisen", "sense", "pumb", "otp", "privatbank"]
+SOURCES = ["monobank", "raiffeisen", "sense", "pumb", "otp", "privatbank", "nbu"]
 
 
 def setup_logging() -> None:
@@ -50,7 +51,20 @@ def cmd_collect() -> int:
         "Збережено %d записів з %d джерел.",
         n, len({r["source"] for r in rates}),
     )
+
+    # Після кожного collect — автоматично перевіряємо алерти
+    from alerts import run_alerts
+    run_alerts(
+        operations=["sell_fx", "buy_usd", "buy_eur"],
+        silent_if_no_trigger=True,
+    )
     return 0
+
+
+def cmd_alert() -> int:
+    """Перевіряє score і відправляє Telegram-алерти якщо вигідно."""
+    from alerts import run_alerts
+    return run_alerts(operations=["sell_fx", "buy_usd", "buy_eur"])
 
 
 def _fmt_rate(v: float | None, digits: int = 4) -> str:
@@ -149,9 +163,8 @@ def cmd_report() -> int:
     lines.append("  • Спред (різниця buy/sell) — головна втрата. Мінімізуй кількість конвертацій.")
     lines.append("  • USD↔EUR: якщо треба і те, і те, вигідніше прямий обмін USD→EUR")
     lines.append("    через крос-курс, ніж USD→UAH→EUR (подвійний спред).")
-    lines.append("  • Райф, Sense і ОТП часто мають кращий курс для великих сум (>$1000),")
+    lines.append("  • Райф і Sense часто мають кращий курс для великих сум (>$1000),")
     lines.append("    ніж Моно — перевіряй перед великою операцією.")
-    lines.append("  • Усі курси — онлайн-обмін в застосунку/інтернет-банку (не готівка в касі).")
     lines.append("=" * 78)
 
     report = "\n".join(lines)
@@ -168,11 +181,12 @@ def main() -> int:
         "mode",
         nargs="?",
         default="both",
-        choices=["collect", "report", "both"],
+        choices=["collect", "report", "both", "alert"],
         help=(
             "collect — тільки зібрати дані (для cron 3х на день); "
             "report — тільки звіт (для cron о 10:00); "
-            "both — і те, і те (ручний запуск)"
+            "both — і те, і те (ручний запуск); "
+            "alert — перевірити score і відправити Telegram-алерти"
         ),
     )
     args = parser.parse_args()
@@ -184,6 +198,9 @@ def main() -> int:
 
     if args.mode in ("report", "both"):
         return cmd_report()
+
+    if args.mode == "alert":
+        return cmd_alert()
 
     return 0
 
